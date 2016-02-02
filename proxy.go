@@ -312,7 +312,6 @@ func (p *Proxy) ListenAndRelay(proto, listen string) error {
 			connectionString = connectionString + "/?authSource=" + p.authdb
 		}
 	}
-	fmt.Println(connectionString)
 	p.backChannel, err = mgo.Dial(connectionString)
 	if err != nil {
 		return err
