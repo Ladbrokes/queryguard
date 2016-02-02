@@ -181,7 +181,8 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 	if !bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) && len(q) > 0 {
 		database, collection := p.splitDatabaseCollection(fullCollectionString)
 		if !p.checkForIndex(database, collection, q) {
-			return p.sendErrorToClient(h, client, fmt.Errorf("No index was found that could be used for your query try db.%s.getIndexes()", collection))
+			// pinched the code value from https://github.com/mongodb/mongo/blob/master/docs/errors.md
+			return p.sendErrorToClient(h, client, fmt.Errorf("No index was found that could be used for your query try db.%s.getIndexes()", collection), 17357)
 		}
 	}
 
@@ -211,54 +212,46 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 
 func (p *Proxy) checkForIndex(databaseName, collectionName string, query bson.D) bool {
 	c := p.backChannel.Clone().DB(databaseName).C(collectionName)
-	if q := p.convertQuery(c, query); q != nil {
-		m := bson.M{}
-		q.Explain(&m)
-		if shardCount, ok := m["numShards"].(int); ok && shardCount > 0 {
-			for _, shard := range m["shards"].(bson.M) {
-				stage := shard.([]interface{})[0].(bson.M)["executionStats"].(bson.M)["executionStages"].(bson.M)
-				if found := p.descendInputStages(stage, "indexBounds"); found == nil || len(found.(bson.M)) == 0 {
-					return false
-				}
+	indexes, err := c.Indexes()
+	if err != nil {
+		fmt.Println(err)
+	}
+	indexFieldName := p.firstIndexableField(query)
+	for _, index := range indexes {
+		if strings.EqualFold(strings.Trim(index.Key[0], "-"), indexFieldName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *Proxy) firstIndexableField(query bson.D) string {
+	if query[0].Name == "query" && len(query) > 1 {
+		if value, ok := query[0].Value.(bson.D); ok && len(value) > 0 {
+			return value[0].Name
+		}
+		if orderby := p.getKey(query, "orderby"); orderby != nil {
+			switch t := orderby.(type) {
+			case bson.D:
+				return t[0].Name
+			case string:
+				return strings.Trim(t, "-")
+			default:
+				log.Printf("Unknown type, %t", t)
 			}
-		} else if bounds, ok := m["indexBounds"].(bson.M); !ok || len(bounds) == 0 {
-			return false
 		}
 	}
-
-	// q is nil which means $explain existed
-	return true
+	return query[0].Name
 }
 
-func (p *Proxy) descendInputStages(input bson.M, find string) interface{} {
-	if found, ok := input[find]; ok {
-		return found
-	}
-	if found, ok := input["inputStage"].(bson.M); ok {
-		return p.descendInputStages(found, find)
-	}
-	return nil
-}
-
-func (p *Proxy) convertQuery(c *mgo.Collection, q bson.D) *mgo.Query {
-	if q[0].Name == "query" && len(q) > 1 {
-		if p.hasKey(q, "$explain") {
-			return nil
-		}
-		query := c.Find(q[0].Value.(bson.D).Map())
-		if p.hasKey(q, "orderby") {
-			query.Sort(p.orderbytosort(p.getKey(q, "orderby")))
-		}
-		return query
-	}
-	return c.Find(q.Map())
-}
-
-func (p *Proxy) sendErrorToClient(h *messageHeader, client io.Writer, err error) error {
+func (p *Proxy) sendErrorToClient(h *messageHeader, client io.Writer, err error, code int) error {
 	errorDoc, _ := bson.Marshal(struct {
 		Error string `bson:"$err"`
+		Code  int    `bson:"code"`
 	}{
 		Error: err.Error(),
+		Code:  code,
 	})
 	errorHeader := &messageHeader{
 		MessageLength: int32(headerLen + len(errorBytes) + len(errorDoc)),
@@ -281,18 +274,13 @@ func (p *Proxy) splitDatabaseCollection(fullName string) (string, string) {
 }
 
 func (p *Proxy) hasKey(d bson.D, k string) bool {
-	for _, v := range d {
-		if strings.EqualFold(v.Name, k) {
-			return true
-		}
-	}
-	return false
+	return p.getKey(d, k) != nil
 }
 
-func (p *Proxy) getKey(d bson.D, k string) bson.D {
+func (p *Proxy) getKey(d bson.D, k string) interface{} {
 	for _, v := range d {
 		if strings.EqualFold(v.Name, k) {
-			return v.Value.(bson.D)
+			return v.Value
 		}
 	}
 	return nil
