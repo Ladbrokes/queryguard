@@ -140,6 +140,11 @@ func (p *Proxy) handleMessage(h *messageHeader, client, server net.Conn) error {
 }
 
 func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWriter) error {
+	remoteAddr := "unknown"
+	if c, ok := client.(net.Conn); ok {
+		remoteAddr = c.RemoteAddr().String()
+	}
+
 	parts := [][]byte{h.ToWire()}
 
 	var flags [4]byte
@@ -176,11 +181,11 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 		return err
 	}
 
-	log.Printf("Buffered OpQuery for %s: %s", fullCollectionString, spew.Sdump(q))
-
 	if !bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) && len(q) > 0 {
+		log.Printf("[%s] Checking OpQuery for %s: %s", remoteAddr, fullCollectionString, spew.Sdump(q))
 		database, collection := p.splitDatabaseCollection(fullCollectionString)
 		if !p.checkForIndex(database, collection, q) {
+			log.Printf("[%s] Rejecting query", remoteAddr)
 			// pinched the code value from https://github.com/mongodb/mongo/blob/master/docs/errors.md
 			return p.sendErrorToClient(h, client, fmt.Errorf("No index was found that could be used for your query try db.%s.getIndexes()", collection), 17357)
 		}
