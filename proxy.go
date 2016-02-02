@@ -27,8 +27,12 @@ var (
 )
 
 type Proxy struct {
-	servers     []string
+	servers []string
+
 	backChannel *mgo.Session
+	user        string
+	pass        string
+	authdb      string
 
 	clientIdleTimeout time.Duration
 	messageTimeout    time.Duration
@@ -207,20 +211,33 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 
 func (p *Proxy) checkForIndex(databaseName, collectionName string, query bson.D) bool {
 	c := p.backChannel.Clone().DB(databaseName).C(collectionName)
-
 	if q := p.convertQuery(c, query); q != nil {
-		m := struct {
-			IndexBounds []interface{} `bson:"indexBounds"`
-		}{}
-		q.Explain(m)
-
-		if m.IndexBounds == nil || len(m.IndexBounds) == 0 {
+		m := bson.M{}
+		q.Explain(&m)
+		if shardCount, ok := m["numShards"].(int); ok && shardCount > 0 {
+			for _, shard := range m["shards"].(bson.M) {
+				stage := shard.([]interface{})[0].(bson.M)["executionStats"].(bson.M)["executionStages"].(bson.M)
+				if found := p.descendInputStages(stage, "indexBounds"); found == nil || len(found.(bson.M)) == 0 {
+					return false
+				}
+			}
+		} else if bounds, ok := m["indexBounds"].(bson.M); !ok || len(bounds) == 0 {
 			return false
 		}
 	}
 
-	// q is nil which means $explain existed, or IndexBounds > 0
+	// q is nil which means $explain existed
 	return true
+}
+
+func (p *Proxy) descendInputStages(input bson.M, find string) interface{} {
+	if found, ok := input[find]; ok {
+		return found
+	}
+	if found, ok := input["inputStage"].(bson.M); ok {
+		return p.descendInputStages(found, find)
+	}
+	return nil
 }
 
 func (p *Proxy) convertQuery(c *mgo.Collection, q bson.D) *mgo.Query {
@@ -264,7 +281,12 @@ func (p *Proxy) splitDatabaseCollection(fullName string) (string, string) {
 }
 
 func (p *Proxy) hasKey(d bson.D, k string) bool {
-	return p.getKey(d, k) != nil
+	for _, v := range d {
+		if strings.EqualFold(v.Name, k) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Proxy) getKey(d bson.D, k string) bson.D {
@@ -295,7 +317,15 @@ func (p *Proxy) ListenAndRelay(proto, listen string) error {
 		return err
 	}
 
-	p.backChannel, err = mgo.Dial(strings.Join(p.servers, ","))
+	connectionString := strings.Join(p.servers, ",")
+	if p.user != "" && p.pass != "" {
+		connectionString = fmt.Sprintf("mongodb://%s:%s@%s", p.user, p.pass, connectionString)
+		if p.authdb != "" {
+			connectionString = connectionString + "/?authSource=" + p.authdb
+		}
+	}
+	fmt.Println(connectionString)
+	p.backChannel, err = mgo.Dial(connectionString)
 	if err != nil {
 		return err
 	}
@@ -309,10 +339,13 @@ func (p *Proxy) ListenAndRelay(proto, listen string) error {
 	}
 }
 
-func newProxy(servers []string, messageTimeout, clientIdleTimeout time.Duration) *Proxy {
+func newProxy(servers []string, user, pass, authdb string, messageTimeout, clientIdleTimeout time.Duration) *Proxy {
 	return &Proxy{
 		servers:           servers,
 		messageTimeout:    messageTimeout,
 		clientIdleTimeout: clientIdleTimeout,
+		user:              user,
+		pass:              pass,
+		authdb:            authdb,
 	}
 }
