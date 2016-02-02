@@ -40,6 +40,8 @@ iptables -t nat -N queryguard
 iptables -t nat -A queryguard -s 10.36.1.49/32 -j ACCEPT
 iptables -t nat -A queryguard -s 10.36.1.8/32 -j ACCEPT
 iptables -t nat -A queryguard -s 10.36.5.8/32 -j ACCEPT
+iptables -t nat -A queryguard -s 10.37.1.155/32 -j ACCEPT
+iptables -t nat -A queryguard -j RETURN
 
 iptables -t nat -A PREROUTING -p tcp -m tcp --dport 27017 -j queryguard
 iptables -t nat -A PREROUTING -p tcp -m tcp --dport 27017 -j REDIRECT --to-ports 29017
