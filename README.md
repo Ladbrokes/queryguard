@@ -1,8 +1,8 @@
 # queryguard
 `queryguard` is a simple 1:1 proxy for mongodb that prevents people from running queries that won't use indexes
 
-We've run into an issue with a 260gb+ dataset where people were accidently querying it with fields that either didn't even exist or were unindexed, `queryguard` lets
-us resolve both of these issues at the same time by only permitting queries that will be using a query - admittedly this is done naively but with the hope the edge
+We've run into an issue with a 260gb+ dataset where people were accidently querying it with fields that either didn't even exist or were unindexed. `queryguard` lets
+us resolve both of these issues at the same time by only permitting queries that will be using an index - admittedly this is done naively but with the hope the edge
 cases result in failed queries not absurdly high mongodb load.
 
 ## Features
