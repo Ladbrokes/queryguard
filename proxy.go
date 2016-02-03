@@ -232,7 +232,7 @@ func (p *Proxy) checkForIndex(databaseName, collectionName string, query bson.D)
 }
 
 func (p *Proxy) firstIndexableField(query bson.D) string {
-	if query[0].Name == "query" && len(query) > 1 {
+	if strings.TrimLeft(query[0].Name, "$") == "query" && len(query) > 1 {
 		if value, ok := query[0].Value.(bson.D); ok && len(value) > 0 {
 			return value[0].Name
 		}
@@ -284,7 +284,7 @@ func (p *Proxy) hasKey(d bson.D, k string) bool {
 
 func (p *Proxy) getKey(d bson.D, k string) interface{} {
 	for _, v := range d {
-		if strings.EqualFold(v.Name, k) {
+		if strings.EqualFold(strings.TrimLeft(v.Name, "$"), k) {
 			return v.Value
 		}
 	}
