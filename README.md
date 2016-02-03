@@ -1,6 +1,20 @@
 # queryguard
 `queryguard` is a simple 1:1 proxy for mongodb that prevents people from running queries that won't use indexes
 
+We've run into an issue with a 260gb+ dataset where people were accidently querying it with fields that either didn't even exist or were unindexed, `queryguard` lets
+us resolve both of these issues at the same time by only permitting queries that will be using a query - admittedly this is done naively but with the hope the edge
+cases result in failed queries not absurdly high mongodb load.
+
+## Features
+
+ * Completely transparant, sits right in between your regular clients and mongo
+ * Can authenticate against the mongo using different credentials than the clients are using
+
+## Building
+
+	cd $GOPATH
+	go get github.com/Ladbrokes/zookeeper
+
 ## Running it
 
 ### With runnit
@@ -37,12 +51,20 @@ exec ./queryguard_linux_amd64 -username root -authenticationDatabase admin -list
 iptables -t nat -N queryguard
 
 # Whitelisted addresses - anything from these addresess won't go to queryguard
-iptables -t nat -A queryguard -s 10.36.1.49/32 -j ACCEPT
-iptables -t nat -A queryguard -s 10.36.1.8/32 -j ACCEPT
-iptables -t nat -A queryguard -s 10.36.5.8/32 -j ACCEPT
-iptables -t nat -A queryguard -s 10.37.1.155/32 -j ACCEPT
+iptables -t nat -A queryguard -s 10.1.2.3/32 -j ACCEPT
+iptables -t nat -A queryguard -s 10.1.2.4/32 -j ACCEPT
+iptables -t nat -A queryguard -s 10.1.2.5/32 -j ACCEPT
+iptables -t nat -A queryguard -s 10.1.2.6/32 -j ACCEPT
 iptables -t nat -A queryguard -j RETURN
 
 iptables -t nat -A PREROUTING -p tcp -m tcp --dport 27017 -j queryguard
 iptables -t nat -A PREROUTING -p tcp -m tcp --dport 27017 -j REDIRECT --to-ports 29017
 ```
+
+## Credit
+
+Inspiration, and protocol.go sourced from the [Dvara](https://github.com/facebookgo/dvara) project
+
+## License
+
+Copyright (c) 2015 Shannon Wynter, Ladbrokes Digital Australia Pty Ltd. Licensed under GPL3. See the [LICENSE.md](LICENSE.md) file for a copy of the license.

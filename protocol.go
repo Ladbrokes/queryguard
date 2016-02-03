@@ -1,6 +1,6 @@
 package main
 
-// Source: https://github.com/facebookgo/dvara - they weren't exporting the types so it wasn't so useful
+// Source and credit to: https://github.com/facebookgo/dvara - they weren't exporting the types so it wasn't so useful
 
 import (
 	"errors"
