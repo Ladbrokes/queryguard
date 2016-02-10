@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"strings"
@@ -105,7 +106,10 @@ func (p *Proxy) handleClientConnection(c net.Conn) {
 		}
 		err = p.handleMessage(h, c, s)
 		if err != nil {
-			log.Println(err)
+			log.Println(err, "reconnecting...")
+			// reconnect cos the server will be trying to write to the client
+			s.Close()
+			s, _ = p.newServerConn()
 		}
 	}
 }
@@ -135,8 +139,7 @@ func (p *Proxy) handleMessage(h *messageHeader, client, server net.Conn) error {
 	client.SetDeadline(deadline)
 
 	if h.OpCode == OpQuery {
-		p.handleQueryRequest(h, client, server)
-		return nil
+		return p.handleQueryRequest(h, client, server)
 	}
 
 	if err := h.WriteTo(server); err != nil {
@@ -227,12 +230,54 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 		return err
 	}
 
+	queryStart := time.Now()
 	if err := copyMessage(client, server); err != nil {
-		log.Println(err)
+		duration := time.Now().Sub(queryStart)
+
+		f := bson.M{"op": "query", "ns": fullCollectionString, "secs_running": bson.M{"$gte": math.Floor(duration.Seconds()) - 1}}
+		p.flattenQuery(q, []string{"query"}, f)
+
+		var ops struct {
+			Inprog []struct {
+				ID interface{} `bson:"opid"`
+			} `bson:"inprog"`
+		}
+
+		pdb := p.backChannel.Clone().DB("admin")
+		if bcerr := pdb.C("$cmd.sys.inprog").Find(f).One(&ops); bcerr == nil {
+			for _, op := range ops.Inprog {
+				log.Println("Killing op", op.ID)
+				pdb.C("$cmd.sys.killop").Find(bson.M{"op": op.ID}).One(nil)
+			}
+
+			if conn, ok := client.(net.Conn); ok {
+				conn.SetDeadline(time.Now().Add(p.messageTimeout))
+			}
+
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				p.sendErrorToClient(h, client, fmt.Errorf("Your query exceeded the time limit of %s and has been killed", p.messageTimeout), 13127)
+			} else {
+				p.sendErrorToClient(h, client, fmt.Errorf("Error: %s. Your query has been killed", err), 14044)
+			}
+		}
+
 		return err
 	}
 
 	return nil
+}
+
+func (p *Proxy) flattenQuery(d interface{}, name []string, result bson.M) {
+	if m, ok := d.(bson.D); ok {
+		for _, v := range m {
+			p.flattenQuery(v, name, result)
+		}
+	} else if td, ok := d.(bson.DocElem); ok {
+		nv := append(name, td.Name)
+		p.flattenQuery(td.Value, nv, result)
+	} else {
+		result[strings.Join(name, ".")] = d
+	}
 }
 
 func (p *Proxy) checkForIndex(databaseName, collectionName string, query bson.D) bool {
