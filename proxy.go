@@ -35,16 +35,18 @@ import (
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 
+	"github.com/NorgannasAddOns/go-uuid"
 	"github.com/davecgh/go-spew/spew"
 )
 
 const headerLen = 16
 
 var (
-	cmdCollectionSuffix  = []byte(".$cmd\000")
-	errNormalClose       = errors.New("normal close")
-	errClientReadTimeout = errors.New("client read timeout")
-	errorBytes           = []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	cmdCollectionSuffix   = []byte(".$cmd\000")
+	indexCollectionSuffix = []byte(".indexes\000")
+	errNormalClose        = errors.New("normal close")
+	errClientReadTimeout  = errors.New("client read timeout")
+	errorBytes            = []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 )
 
 type Proxy struct {
@@ -164,6 +166,7 @@ func (p *Proxy) handleMessage(h *messageHeader, client, server net.Conn) error {
 
 func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWriter) error {
 	remoteAddr := "unknown"
+	queryID := ""
 	if c, ok := client.(net.Conn); ok {
 		remoteAddr = c.RemoteAddr().String()
 	}
@@ -197,14 +200,14 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 		log.Println(err)
 		return err
 	}
-	parts = append(parts, queryDoc)
+
 	var q bson.D
 	if err := bson.Unmarshal(queryDoc, &q); err != nil {
 		log.Println(err)
 		return err
 	}
 
-	if !bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) && len(q) > 0 {
+	if !(bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) || bytes.HasSuffix(fullCollectionName, indexCollectionSuffix)) && len(q) > 0 {
 		log.Printf("[%s] Checking OpQuery for %s: %s", remoteAddr, fullCollectionString, spew.Sdump(q))
 		database, collection := p.splitDatabaseCollection(fullCollectionString)
 		if !p.checkForIndex(database, collection, q) {
@@ -212,6 +215,21 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 			// pinched the code value from https://github.com/mongodb/mongo/blob/master/docs/errors.md
 			return p.sendErrorToClient(h, client, fmt.Errorf("No index was found that could be used for your query try db.%s.getIndexes()", collection), 17357)
 		}
+
+		// Tag the query so it's easier to find later
+		queryID := uuid.New("Q")
+		q = p.mutateQuery(q, remoteAddr, queryID)
+		newdoc, _ := bson.Marshal(q)
+
+		// Newdoc should be bigger than old, so lets get deletey
+		h.MessageLength = h.MessageLength - int32(len(queryDoc)) + int32(len(newdoc))
+
+		// Re-create the header
+		parts[0] = h.ToWire()
+		parts = append(parts, newdoc)
+
+	} else {
+		parts = append(parts, queryDoc)
 	}
 
 	var written int
@@ -234,8 +252,15 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 	if err := copyMessage(client, server); err != nil {
 		duration := time.Now().Sub(queryStart)
 
-		f := bson.M{"op": "query", "ns": fullCollectionString, "secs_running": bson.M{"$gte": math.Floor(duration.Seconds()) - 1}}
-		p.flattenQuery(q, []string{"query"}, f)
+		f := bson.M{"op": "query", "ns": fullCollectionString}
+		if queryID == "" {
+			// Brute force termination
+			f["secs_running"] = bson.M{"$gte": math.Floor(duration.Seconds()) - 1}
+			p.flattenQuery(q, []string{"query"}, f)
+		} else {
+			// We knew about this query so we can find it
+			f["query.$queryGuard.track"] = queryID
+		}
 
 		var ops struct {
 			Inprog []struct {
@@ -246,16 +271,20 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 		pdb := p.backChannel.Clone().DB("admin")
 		if bcerr := pdb.C("$cmd.sys.inprog").Find(f).One(&ops); bcerr == nil {
 			for _, op := range ops.Inprog {
-				log.Println("Killing op", op.ID)
-				pdb.C("$cmd.sys.killop").Find(bson.M{"op": op.ID}).One(nil)
+				err := pdb.C("$cmd.sys.killop").Find(bson.M{"op": op.ID}).One(nil)
+				if err != nil {
+					log.Println(err)
+				}
 			}
 
 			if conn, ok := client.(net.Conn); ok {
 				conn.SetDeadline(time.Now().Add(p.messageTimeout))
 			}
 
+			log.Println(duration)
+
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				p.sendErrorToClient(h, client, fmt.Errorf("Your query exceeded the time limit of %s and has been killed", p.messageTimeout), 13127)
+				p.sendErrorToClient(h, client, fmt.Errorf("Your query exceeded the time limit of %s and has been killed", p.messageTimeout), 50)
 			} else {
 				p.sendErrorToClient(h, client, fmt.Errorf("Error: %s. Your query has been killed", err), 14044)
 			}
@@ -265,6 +294,45 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 	}
 
 	return nil
+}
+
+func (p *Proxy) mutateQuery(query bson.D, remoteAddr, queryID string) bson.D {
+	if !(len(query) > 1 && strings.TrimLeft(query[0].Name, "$") == "query") {
+		query = bson.D{
+			bson.DocElem{
+				Name:  "$query",
+				Value: query,
+			},
+		}
+	}
+
+	maxTimeMS := float64((p.messageTimeout - 1*time.Second) / time.Millisecond)
+	if index := p.keyIndex(query, "maxTimeMS"); index >= 0 {
+		if query[index].Value.(float64) > maxTimeMS {
+			query[index].Value = maxTimeMS
+		}
+	} else {
+		query = append(query, bson.DocElem{
+			Name:  "$maxTimeMS",
+			Value: maxTimeMS,
+		})
+	}
+
+	query = append(query, bson.DocElem{
+		Name: "$queryGuard",
+		Value: bson.D{
+			bson.DocElem{
+				Name:  "remoteaddr",
+				Value: remoteAddr,
+			},
+			bson.DocElem{
+				Name:  "track",
+				Value: queryID,
+			},
+		},
+	})
+
+	return query
 }
 
 func (p *Proxy) flattenQuery(d interface{}, name []string, result bson.M) {
@@ -343,15 +411,22 @@ func (p *Proxy) splitDatabaseCollection(fullName string) (string, string) {
 	return split[0], split[1]
 }
 
+func (p *Proxy) keyIndex(d bson.D, k string) int {
+	for i, v := range d {
+		if strings.EqualFold(strings.TrimLeft(v.Name, "$"), k) {
+			return i
+		}
+	}
+	return -1
+}
+
 func (p *Proxy) hasKey(d bson.D, k string) bool {
-	return p.getKey(d, k) != nil
+	return p.keyIndex(d, k) >= 0
 }
 
 func (p *Proxy) getKey(d bson.D, k string) interface{} {
-	for _, v := range d {
-		if strings.EqualFold(strings.TrimLeft(v.Name, "$"), k) {
-			return v.Value
-		}
+	if index := p.keyIndex(d, k); index >= 0 {
+		return d[index].Value
 	}
 	return nil
 }
