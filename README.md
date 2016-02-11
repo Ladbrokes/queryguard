@@ -9,6 +9,10 @@ cases result in failed queries not absurdly high mongodb load.
 
  * Completely transparant, sits right in between your regular clients and mongo
  * Can authenticate against the mongo using different credentials than the clients are using
+ * Tracks queries against connections
+ * Tags queries with the original remote address
+ * Automatically sets $maxTimeMS to 1 second less than the message_timeout
+ * Automatically tries to kill the running queries when the connection is dropped (due to whatever reason)
 
 ## Building
 
