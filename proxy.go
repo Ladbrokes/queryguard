@@ -44,6 +44,7 @@ const headerLen = 16
 var (
 	cmdCollectionSuffix   = []byte(".$cmd\000")
 	indexCollectionSuffix = []byte(".indexes\000")
+	systemCollection      = []byte(".system.")
 	errNormalClose        = errors.New("normal close")
 	errClientReadTimeout  = errors.New("client read timeout")
 	errorBytes            = []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
@@ -207,7 +208,7 @@ func (p *Proxy) handleQueryRequest(h *messageHeader, client, server io.ReadWrite
 		return err
 	}
 
-	if !(bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) || bytes.HasSuffix(fullCollectionName, indexCollectionSuffix)) && len(q) > 0 {
+	if !(bytes.HasSuffix(fullCollectionName, cmdCollectionSuffix) || bytes.HasSuffix(fullCollectionName, indexCollectionSuffix) || bytes.Contains(fullCollectionName, systemCollection)) && len(q) > 0 {
 		log.Printf("[%s] Checking OpQuery for %s: %s", remoteAddr, fullCollectionString, spew.Sdump(q))
 		database, collection := p.splitDatabaseCollection(fullCollectionString)
 		if !p.checkForIndex(database, collection, q) {
@@ -350,6 +351,14 @@ func (p *Proxy) flattenQuery(d interface{}, name []string, result bson.M) {
 
 func (p *Proxy) checkForIndex(databaseName, collectionName string, query bson.D) bool {
 	c := p.backChannel.Clone().DB(databaseName).C(collectionName)
+	count, err := c.Count()
+	if err != nil {
+		fmt.Println(err)
+	}
+	// No point index checking an empty collection - it may not even exist
+	if count == 0 {
+		return true
+	}
 	indexes, err := c.Indexes()
 	if err != nil {
 		fmt.Println(err)
