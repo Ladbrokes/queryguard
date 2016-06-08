@@ -29,6 +29,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -461,11 +462,12 @@ func (p *Proxy) ListenAndRelay(proto, listen string) error {
 
 	connectionString := strings.Join(p.servers, ",")
 	if p.user != "" && p.pass != "" {
-		connectionString = fmt.Sprintf("mongodb://%s:%s@%s", p.user, p.pass, connectionString)
+		connectionString = fmt.Sprintf("mongodb://%s:%s@%s", p.user, url.QueryEscape(p.pass), connectionString)
 		if p.authdb != "" {
 			connectionString = connectionString + "/?authSource=" + p.authdb
 		}
 	}
+
 	p.backChannel, err = mgo.Dial(connectionString)
 	if err != nil {
 		return err
